@@ -1,0 +1,21 @@
+# Widened partition layout for the local custom build.
+#
+# The upstream layout gives each app slot 0x150000 (1,376,256 B). With the
+# current Arduino-ESP32 core (3.3.12) the firmware comes out at ~1,407,049 B
+# and does not fit -- the same checkprogsize failure reported upstream in
+# PR #49. The app slots are widened to 0x180000 so the firmware fits with
+# ~165 KB of headroom (firmware OTA still works, the uploaded image has to
+# fit the slot too).
+#
+# The LittleFS partition shrinks from 0x150000 to 0x0F0000 (983,040 B),
+# which still holds 196,608 domains at 5 bytes each -- the weekly upstream
+# list is 129,651 (648,255 B), so it fits with room to spare.
+#
+# The web-flash manifest must use the new filesystem offset 0x310000.
+#
+# Name,     Type, SubType, Offset,   Size
+nvs,        data, nvs,     0x9000,   0x5000
+otadata,    data, ota,     0xe000,   0x2000
+app0,       app,  ota_0,   0x10000,  0x180000
+app1,       app,  ota_1,   0x190000, 0x180000
+spiffs,     data, spiffs,  0x310000, 0xF0000

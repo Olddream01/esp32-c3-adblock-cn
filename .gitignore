@@ -1,0 +1,6 @@
+# 本地口令文件，不入库
+src/secrets.h
+
+# 构建产物
+.pio/
+data/blocklist.bin
