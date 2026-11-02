@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>C3 AdBlock 定制版 · 刷机页</title>
+<meta name="description" content="ESP32-C3 全网广告拦截器 · 国内上游 119.29.29.29 · WiFi 配置持久化修复版">
+<script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 0; background: #0d1117; color: #c9d1d9;
+         font: 16px/1.7 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
+  .wrap { max-width: 680px; margin: 0 auto; padding: 48px 20px 80px; }
+  h1 { font-size: 30px; margin: 0 0 6px; }
+  h1 .g { color: #3fb950; }
+  .sub { color: #8b949e; margin: 0 0 28px; }
+  .card { background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 22px; margin: 18px 0; }
+  .center { text-align: center; }
+  ol { padding-left: 20px; } li { margin: 8px 0; }
+  esp-web-install-button { --esp-tools-button-color: #000; --esp-tools-button-background-color: #3fb950; }
+  esp-web-install-button[install-unsupported] { display: none; }
+  .unsupported { display: none; color: #f85149; }
+  a { color: #58a6ff; }
+  .note { color: #8b949e; font-size: 14px; }
+  code { background: #21262d; padding: 1px 6px; border-radius: 5px; font-family: ui-monospace, Consolas, monospace; }
+  .flags { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 12px; justify-content: center; }
+  .flag { background: #21262d; border-radius: 6px; padding: 4px 10px; font-size: 13px; color: #8b949e; }
+  .new { border-left: 3px solid #3fb950; background: #0f1d14; }
+  .new b { color: #3fb950; }
+  .key { color: #3fb950; font-weight: 600; }
+  table { border-collapse: collapse; width: 100%; font-size: 14px; margin-top: 8px; }
+  td, th { border-bottom: 1px solid #30363d; padding: 7px 4px; text-align: left; vertical-align: top; }
+  th { color: #8b949e; font-weight: 500; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🛡️ <span class="g">C3 AdBlock</span> <span style="font-size:18px;color:#8b949e">定制版</span></h1>
+  <p class="sub">ESP32-C3 全网 DNS 广告拦截器 —— 上游换成国内 DNSPod，WiFi 配置改成真正持久。</p>
+
+  <div class="card center">
+    <p style="margin-top:0">把 <b>ESP32-C3 SuperMini</b> 用数据线插到这个电脑，然后：</p>
+    <esp-web-install-button manifest="./manifest.json">
+      <button slot="activate" style="font:600 17px system-ui;padding:14px 26px;border:0;border-radius:8px;background:#3fb950;color:#000;cursor:pointer">⚡ 连接并安装</button>
+      <span slot="unsupported" class="unsupported">你的浏览器不支持串口 —— 请改用桌面版 <b>Chrome</b> 或 <b>Edge</b>。</span>
+      <span slot="not-allowed" class="unsupported">你需要先允许浏览器访问串口。</span>
+    </esp-web-install-button>
+    <div class="flags">
+      <span class="flag">Chrome / Edge 桌面版</span>
+      <span class="flag">约 30 秒</span>
+      <span class="flag">上游 119.29.29.29</span>
+      <span class="flag">WiFi 不再丢</span>
+    </div>
+  </div>
+
+  <div class="card new">
+    <b>✅ 这版相对官方预编译固件改了什么</b>
+    <table>
+      <tr><th>上游 DNS</th><td>Quad9 <code>9.9.9.9</code> → <span class="key">DNSPod <code>119.29.29.29</code></span>（国内可达，不易被劫持）</td></tr>
+      <tr><th>WiFi 持久化</th><td>凭据<b>双备份</b>：NVS + LittleFS <code>/wifi.cfg</code>；NVS 丢了会自动从备份恢复并回写</td></tr>
+      <tr><th>重启后重连</th><td>开机连网改 <b>3 次 × 20 秒</b>重试；连不上时后台每 15 秒继续重试，路由器一恢复就自己接上</td></tr>
+      <tr><th>误触 BOOT</th><td>清空 WiFi 的触发条件从「按住 60 毫秒」改成<b>按住 3 秒</b>，插线时蹭到按钮不再清空</td></tr>
+      <tr><th>配网页</th><td>自动<b>填好</b>上次保存的 WiFi 名字，一眼能看出配置还在不在</td></tr>
+      <tr><th>断线自愈</th><td>运行中掉线自动重连，不会悄悄变成一个没人能访问的 DNS</td></tr>
+      <tr><th>安全</th><td>官方预编译固件是 7 月 26 日的版本，<b>完全没有密码保护</b>；这版带 Basic Auth + CSRF 校验，而且<b>不内置任何可用密码</b>——密码在配网页或面板里现场设定，存在设备 NVS</td></tr>
+      <tr><th>封禁列表</th><td>直接内置官方本周列表 <b>129,651 条</b>（官方预编译版只有约 5.7 万条）</td></tr>
+    </table>
+  </div>
+
+  <div class="card">
+    <b>刷完之后</b>
+    <ol>
+      <li>如果之前已经配过 WiFi，<b>新固件会自动连上</b>（NVS 里存的配置被直接继承了），不用重新配。</li>
+      <li>没有配置过的话，手机连上热点 <code>C3-AdBlock-XXXX</code>，弹出的页面里填 WiFi 密码即可。</li>
+      <li>面板：<code>http://c3adblock.local</code>（Windows 解析不了就用路由器后台里的那个 IP）。</li>
+    </ol>
+    <p class="note">这版<b>不擦除</b>整片 flash（manifest 里关掉了 erase 提示），所以 NVS 里的 WiFi 配置能活下来。首次如果浏览器问要不要擦除，选不擦。</p>
+  </div>
+
+  <div class="card new">
+    <b>🔐 刷完第一件事：设自己的面板密码</b>
+    <p style="margin:0 0 8px">固件里<b>没有</b>内置任何可用密码（编译期用的是上游占位符），这样公开分发才不会变成"谁都能改你的设备"。</p>
+    <ol style="margin:0">
+      <li><b>配网页</b>（首次开机时手机连 <code>C3-AdBlock-XXXX</code> 弹出的那个）里有两个可选输入框：<b>Dashboard password</b> 和 <b>Network OTA password</b>，都填上自己的（≥6 位）。</li>
+      <li>如果刷的时候 NVS 里已经有 WiFi 配置、配网页没出现，就直接打开面板，用默认口令 <code>admin / CHANGE_ME_WEB_PASSWORD</code> 登录，然后在 <b>SECURITY — PASSWORDS</b> 一栏改掉。</li>
+    </ol>
+    <p class="note" style="margin-bottom:0">密码存在设备本地的 NVS 里，重启、重刷封禁列表都不会丢，也不需要重新烧录。</p>
+  </div>
+
+  <p class="note">
+    项目：<a href="https://github.com/M-Abozaid/esp32-c3-adblock">M-Abozaid/esp32-c3-adblock</a>（MIT）。
+    本地固件由 MCode 重新编译，源码基于上游 HEAD（<code>238ef7b</code>）+ WiFi 持久化补丁。
+  </p>
+</div>
+</body>
+</html>
