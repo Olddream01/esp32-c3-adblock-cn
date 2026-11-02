@@ -54,9 +54,21 @@ pio run -e c3 -t uploadfs
 
 改上游 DNS 只要改 `platformio.ini` 里的 `-DUPSTREAM_IP=`。
 
-### Release 下载
+### 直接下载
 
-不想用网页刷机的，从本仓库的 **Releases** 下载完整刷机包：固件文件 + 中文刷机页 + 串口日志工具（`看日志.py`）+ 补丁 diff。
+不想用网页刷机的，直接下 `release-assets/` 里的文件：
+
+| 文件 | 说明 |
+|---|---|
+| [`release-assets/C3-AdBlock-定制版-119DNS.zip`](release-assets/C3-AdBlock-定制版-119DNS.zip) | 完整刷机包（2.1 MB）：固件文件 + 中文刷机页 + 一键启动脚本 + 串口日志工具 + 使用说明 |
+| [`release-assets/WiFi持久化补丁.patch`](release-assets/WiFi持久化补丁.patch) | 相对上游 HEAD 的源码补丁（+216/-43），`git apply` 直接用 |
+
+解锁 zip 后双击 `启动刷写.bat`，或把 `docs/` 里的 7 个文件单独下下来配 `manifest.json` 也能刷。
+
+---
+
+## 以下为上游项目文档（中文翻译版）
+
 
 ---
 
