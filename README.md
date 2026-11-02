@@ -25,7 +25,7 @@
 ### 一键网页刷机
 
 1. 在仓库 **Settings → Pages** 开启 Pages（Source 选 `main` 分支、目录选 `/docs`）
-2. 用**桌面版 Chrome 或 Edge** 打开 `https://olddream01.github.io/esp32-c3-adblock/`
+2. 用**桌面版 Chrome 或 Edge** 打开 `https://olddream01.github.io/esp32-c3-adblock-cn/`
 3. 点「⚡ 连接并安装」，选 ESP32-C3 的 COM 口，约 30 秒刷完
 4. 手机连上 `C3-AdBlock-XXXX` 热点，在弹出的页面里填 WiFi 密码，**顺便把「Dashboard password」和「Network OTA password」也填上**（≥6 位）
 5. 面板在 `http://c3adblock.local`，用户名 `admin`
@@ -64,6 +64,11 @@ pio run -e c3 -t uploadfs
 | [`release-assets/WiFi持久化补丁.patch`](release-assets/WiFi持久化补丁.patch) | 相对上游 HEAD 的源码补丁（+216/-43），`git apply` 直接用 |
 
 解锁 zip 后双击 `启动刷写.bat`，或把 `docs/` 里的 7 个文件单独下下来配 `manifest.json` 也能刷。
+
+---
+
+## 以下为上游项目文档（中文翻译版）
+
 
 ---
 
