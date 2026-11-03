@@ -71,37 +71,6 @@ Preferences prefs;
 DNSServer   dnsPortal;
 String      portalOpts;             // <option> list of scanned networks, built once at portal start
 String      savedSsid, savedPass;   // last known network, kept so the portal can prefill it and retry on its own
-String      dashPass, otaPassR;    // runtime credentials; empty = fall back to the compile-time secrets.h values
-
-// ---------- runtime credentials ----------
-// A publicly shared build ships with the placeholder WEB_PASS/OTA_PASS that
-// everybody can read in the repo, so the real passwords are set at runtime --
-// on the setup portal or from the dashboard -- and kept in NVS ("sec").
-// The compile-time values are only the fallback.
-static const char* activeWebPass() { return dashPass.length() ? dashPass.c_str() : WEB_PASS; }
-static const char* activeOtaPass() { return otaPassR.length() ? otaPassR.c_str() : OTA_PASS; }
-
-static void loadRuntimeCreds() {
-  prefs.begin("sec", true);
-  dashPass = prefs.getString("web", "");
-  otaPassR = prefs.getString("ota", "");
-  prefs.end();
-  Serial.printf("[sec] dashboard password: %s | OTA password: %s\n",
-                dashPass.length() ? "set on device" : "compile-time default",
-                otaPassR.length() ? "set on device" : "compile-time default");
-}
-static bool saveRuntimeCred(const char* key, const String& val, String& cache) {
-  prefs.begin("sec", false); prefs.putString(key, val); prefs.end();
-  prefs.begin("sec", true); String back = prefs.getString(key, ""); prefs.end();
-  if (back != val) { Serial.printf("[sec] WARN: NVS write failed for %s\n", key); return false; }
-  cache = val;
-  return true;
-}
-static bool usingDefaultCreds() {
-  bool webDefault = !dashPass.length() && strcmp(WEB_PASS, "CHANGE_ME_WEB_PASSWORD") == 0;
-  bool otaDefault = !otaPassR.length() && strcmp(OTA_PASS, "CHANGE_ME_OTA_PASSWORD") == 0;
-  return webDefault || otaDefault;
-}
 
 // blocking pause (Pi-hole-style "disable for a while")
 bool     blockingOn = true;
@@ -358,7 +327,6 @@ static void handleStats() {
              ",\"upurl\":\"" + jesc(updateUrl) + "\",\"upiv\":" + updateIntervalH + ",\"upstat\":\"" + jesc(updateStatus) + "\"" +
              ",\"blocking\":" + (blockingOn ? "true" : "false") +
              ",\"resumeIn\":" + (uint32_t)(!blockingOn && resumeAt ? (resumeAt - millis()) / 1000 : 0) +
-             ",\"defcreds\":" + (usingDefaultCreds() ? "true" : "false") +
              ",\"upstream\":\"" + jesc(UPSTREAM.toString()) + "\"" +
              ",\"clients\":[";
   for (int i = 0; i < numClients; i++) { Dev& c = clients[i]; IPAddress ip(c.ip);
@@ -383,14 +351,16 @@ static void handleStats() {
 // drive-by case without needing TLS, cookies, or a token endpoint.
 static const char* CSRF_HEADER = "X-Requested-With";
 static const char* CSRF_VALUE  = "c3-adblock";
-static bool requireAuth() {
+// No username/password on the dashboard: this build is meant for a trusted
+// LAN only. What is still enforced is the custom header -- a plain <img> or
+// auto-submitted <form> from a random website cannot attach it, so drive-by
+// CSRF against this device stays blocked even without credentials.
+static bool requireCsrf() {
   if (web.header(CSRF_HEADER) != CSRF_VALUE) { web.send(403, "text/plain", "missing CSRF header"); return false; }
-  if (web.authenticate(WEB_USER, activeWebPass())) return true;
-  web.requestAuthentication();
-  return false;
+  return true;
 }
 static void handleBan() {
-  if (!requireAuth()) return;
+  if (!requireCsrf()) return;
   IPAddress ip; if (ip.fromString(web.arg("ip"))) { Dev* c = getClient((uint32_t)ip); if (c) { c->banned = !c->banned; saveBanned(); } }
   web.send(200, "text/plain", "ok");
 }
@@ -424,7 +394,7 @@ static bool upOk = false;
 static bool upAuthOk = false;
 static File upFile;
 static void handleUploadDone() {
-  if (!upAuthOk) { web.requestAuthentication(); return; }
+  if (!upAuthOk) { web.send(403, "text/plain", "missing CSRF header"); return; }
   web.send(upOk ? 200 : 500, "text/plain",
            upOk ? "ok" : "rejected: empty or size not a multiple of 5 (not a blocklist.bin?)");
 }
@@ -432,7 +402,7 @@ static void handleUpload() {
   HTTPUpload& u = web.upload();
   switch (u.status) {
     case UPLOAD_FILE_START:
-      upAuthOk = web.header(CSRF_HEADER) == CSRF_VALUE && web.authenticate(WEB_USER, activeWebPass());
+      upAuthOk = web.header(CSRF_HEADER) == CSRF_VALUE;
       if (!upAuthOk) { Serial.println("[ota] blocklist upload: auth/CSRF check failed"); break; }
       upOk = false; beginBlocklistSwap();
       upFile = LittleFS.open("/blocklist.new", "w");
@@ -498,7 +468,7 @@ static bool fetchBlocklist(String url) {
 // ---------- firmware OTA (browser upload of firmware.bin -> reboot) ----------
 static bool fwAuthOk = false;
 static void handleFwUpdateDone() {
-  if (!fwAuthOk) { web.requestAuthentication(); return; }
+  if (!fwAuthOk) { web.send(403, "text/plain", "missing CSRF header"); return; }
   bool ok = !Update.hasError();
   web.send(ok ? 200 : 500, "text/plain", ok ? "ok, rebooting" : "firmware update failed");
   if (ok) { delay(300); ESP.restart(); }
@@ -506,7 +476,7 @@ static void handleFwUpdateDone() {
 static void handleFwUpload() {
   HTTPUpload& u = web.upload();
   if (u.status == UPLOAD_FILE_START) {
-    fwAuthOk = web.header(CSRF_HEADER) == CSRF_VALUE && web.authenticate(WEB_USER, activeWebPass());
+    fwAuthOk = web.header(CSRF_HEADER) == CSRF_VALUE;
     if (!fwAuthOk) { Serial.println("[fw-ota] auth/CSRF check failed, rejecting flash"); return; }
     Serial.printf("[fw-ota] %s\n", u.filename.c_str());
     if (!Update.begin(UPDATE_SIZE_UNKNOWN)) Update.printError(Serial);
@@ -621,8 +591,6 @@ static void handlePortalRoot() {
     "<input list=nets name=s value='" + htmlEscape(savedSsid) + "' placeholder='WiFi name' required style='width:100%;box-sizing:border-box;padding:11px;margin:6px 0;border-radius:6px;border:1px solid #30363d;background:#161b22;color:#c9d1d9'>"
     "<datalist id=nets>" + portalOpts + "</datalist>"
     "<input name=p type=password placeholder='WiFi password' style='width:100%;box-sizing:border-box;padding:11px;margin:6px 0;border-radius:6px;border:1px solid #30363d;background:#161b22;color:#c9d1d9'>"
-    "<input name=dp type=password placeholder='Dashboard password (optional, min 6 chars)' style='width:100%;box-sizing:border-box;padding:11px;margin:6px 0;border-radius:6px;border:1px solid #30363d;background:#161b22;color:#c9d1d9'>"
-    "<input name=op type=password placeholder='Network OTA password (optional, min 6 chars)' style='width:100%;box-sizing:border-box;padding:11px;margin:6px 0;border-radius:6px;border:1px solid #30363d;background:#161b22;color:#c9d1d9'>"
     + saved +
     "<button style='width:100%;padding:12px;margin-top:8px;border-radius:6px;border:0;background:#3fb950;color:#000;font-weight:600;cursor:pointer'>Connect</button>"
     "</form></body>";
@@ -635,9 +603,6 @@ static void handleWifiSave() {
   savedSsid = ss; savedPass = pw;
   // Optional: let the user set the dashboard / OTA password right here, so a
   // publicly shared build never has to ship a usable password in the binary.
-  String dp = web.arg("dp"), op = web.arg("op");
-  if (dp.length() >= 6) saveRuntimeCred("web", dp, dashPass);
-  if (op.length() >= 6) saveRuntimeCred("ota", op, otaPassR);
   web.send(200, "text/html", "<!doctype html><meta charset=utf-8><body style='font:16px system-ui;text-align:center;margin-top:60px'>"
                              "&#9989; Saved. Restarting and joining <b>" + htmlEscape(ss) + "</b>&hellip;<br><br>"
                              "Reconnect your phone to your normal WiFi, then find the box at <b>c3adblock.local</b>.</body>");
@@ -698,7 +663,6 @@ void setup() {
     buildFlashIndex();
   }
   loadCustom(); loadBanned(); loadUpdateCfg();
-  loadRuntimeCreds();                       // runtime dashboard/OTA passwords (NVS "sec")
   Serial.printf("custom: %d, banned: %d\n", numCustom, numBanned);
 
   // Hold BOOT at power-on to wipe saved WiFi and force the setup portal.
@@ -726,52 +690,34 @@ void setup() {
   Serial.printf("upstream DNS: %s:%u\n", UPSTREAM.toString().c_str(), (unsigned)UPSTREAM_PORT);
   if (MDNS.begin("c3adblock")) { MDNS.addService("http", "tcp", 80); Serial.println("dashboard: http://c3adblock.local"); }
 
-  if (strcmp(WEB_PASS, "CHANGE_ME_WEB_PASSWORD") == 0 || strcmp(OTA_PASS, "CHANGE_ME_OTA_PASSWORD") == 0)
-    Serial.println("[WARN] secrets.h still has placeholder WEB_PASS/OTA_PASS — those are public "
-                    "(they're in the repo's example file). Set real values before trusting this "
-                    "device on a network you don't fully control.");
 
   dnsServer.begin(DNS_PORT); upstreamCli.begin(0);
-  { const char* hdrs[] = { CSRF_HEADER }; web.collectHeaders(hdrs, 1); }  // needed for requireAuth()'s CSRF check
+  { const char* hdrs[] = { CSRF_HEADER }; web.collectHeaders(hdrs, 1); }  // needed for requireCsrf()'s CSRF check
   web.on("/", []() { web.send_P(200, "text/html", PAGE); });
   web.on("/stats.json", handleStats);
   web.on("/ban", handleBan);
-  web.on("/addblock", []() { if (!requireAuth()) return; addCustom(web.arg("d")); web.send(200, "text/plain", "ok"); });
-  web.on("/unblock", []() { if (!requireAuth()) return; removeCustom(web.arg("d")); web.send(200, "text/plain", "ok"); });
-  web.on("/setpass", []() {           // set the dashboard password at runtime (NVS)
-    if (!requireAuth()) return;
-    String p = web.arg("p");
-    if (p.length() < 6) { web.send(400, "text/plain", "too short (min 6 chars)"); return; }
-    web.send(200, "text/plain", saveRuntimeCred("web", p, dashPass) ? "ok" : "failed to persist");
-  });
-  web.on("/setotapass", []() {        // set the network-OTA password at runtime (NVS)
-    if (!requireAuth()) return;
-    String p = web.arg("p");
-    if (p.length() < 6) { web.send(400, "text/plain", "too short (min 6 chars)"); return; }
-    if (saveRuntimeCred("ota", p, otaPassR)) { ArduinoOTA.setPassword(activeOtaPass()); web.send(200, "text/plain", "ok"); }
-    else web.send(500, "text/plain", "failed to persist");
-  });
+  web.on("/addblock", []() { if (!requireCsrf()) return; addCustom(web.arg("d")); web.send(200, "text/plain", "ok"); });
+  web.on("/unblock", []() { if (!requireCsrf()) return; removeCustom(web.arg("d")); web.send(200, "text/plain", "ok"); });
   web.on("/pause", []() {                    // /pause?s=300  (0 or absent = indefinite)
-    if (!requireAuth()) return;
+    if (!requireCsrf()) return;
     long s = web.hasArg("s") ? web.arg("s").toInt() : 0;
     blockingOn = false; resumeAt = (s > 0) ? millis() + (uint32_t)s * 1000UL : 0;
     web.send(200, "text/plain", "paused");
   });
-  web.on("/resume", []() { if (!requireAuth()) return; blockingOn = true; resumeAt = 0; web.send(200, "text/plain", "resumed"); });
-  web.on("/forgetwifi", []() { if (!requireAuth()) return; web.send(200, "text/plain", "cleared — rebooting into setup portal");
+  web.on("/resume", []() { if (!requireCsrf()) return; blockingOn = true; resumeAt = 0; web.send(200, "text/plain", "resumed"); });
+  web.on("/forgetwifi", []() { if (!requireCsrf()) return; web.send(200, "text/plain", "cleared — rebooting into setup portal");
     prefs.begin("wifi", false); prefs.clear(); prefs.end(); LittleFS.remove(WIFI_BACKUP_PATH); delay(500); ESP.restart(); });
   web.on("/upload", HTTP_POST, handleUploadDone, handleUpload);      // blocklist OTA (auth inside handleUpload)
   web.on("/update", HTTP_POST, handleFwUpdateDone, handleFwUpload);  // firmware OTA (auth inside handleFwUpload)
-  web.on("/fetchnow", []() { if (!requireAuth()) return; fetchBlocklist(updateUrl); web.send(200, "text/plain", updateStatus); });
+  web.on("/fetchnow", []() { if (!requireCsrf()) return; fetchBlocklist(updateUrl); web.send(200, "text/plain", updateStatus); });
   web.on("/setupdate", []() {
-    if (!requireAuth()) return;
+    if (!requireCsrf()) return;
     if (web.hasArg("u")) updateUrl = web.arg("u");
     if (web.hasArg("h")) { updateIntervalH = web.arg("h").toInt(); if (updateIntervalH < 1) updateIntervalH = 1; }
     saveUpdateCfg(); web.send(200, "text/plain", "ok");
   });
   web.begin();
   ArduinoOTA.setHostname("c3adblock");   // pio run -t upload --upload-port c3adblock.local
-  ArduinoOTA.setPassword(activeOtaPass());      // network OTA was unauthenticated upstream
   ArduinoOTA.begin();
   Serial.println("DNS :53 + dashboard :80 + OTA up");
 }

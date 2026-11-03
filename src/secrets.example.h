@@ -8,6 +8,3 @@ static const char* WIFI_PASS = "YOUR_WIFI_PASSWORD";
 // /update, /setupdate, /forgetwifi) and for network OTA (ArduinoOTA). These used
 // to be wide open to anyone who could reach the device on the LAN — pick real
 // values here, ideally not the same as your WiFi password.
-static const char* WEB_USER = "admin";
-static const char* WEB_PASS = "CHANGE_ME_WEB_PASSWORD";
-static const char* OTA_PASS = "CHANGE_ME_OTA_PASSWORD";
