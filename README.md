@@ -65,7 +65,7 @@ pio run -e c3 -t uploadfs
 | 文件 | 说明 |
 |---|---|
 | [`release-assets/C3-AdBlock-定制版-119DNS.zip`](release-assets/C3-AdBlock-定制版-119DNS.zip) | 完整刷机包（2.1 MB）：固件文件 + 中文刷机页 + 一键启动脚本 + 串口日志工具 + 使用说明 |
-| [`release-assets/WiFi持久化补丁.patch`](release-assets/WiFi持久化补丁.patch) | 相对上游 HEAD 的源码补丁（+216/-43），`git apply` 直接用 |
+| [`release-assets/WiFi持久化补丁.patch`](release-assets/WiFi持久化补丁.patch) | 相对上游 HEAD 的源码补丁（+173/-64），`git apply` 直接用 |
 
 解锁 zip 后双击 `启动刷写.bat`，或把 `docs/` 里的 7 个文件单独下下来配 `manifest.json` 也能刷。
 
@@ -73,67 +73,17 @@ pio run -e c3 -t uploadfs
 
 ## 以下为上游项目文档（中文翻译版）
 
-
----
-
-## 以下为上游项目文档（中文翻译版）
-
-
----
-
-## 以下为上游项目文档（中文翻译版）
-
-
----
-
-## 以下为上游项目文档（中文翻译版）
-
-> **转载来自：<https://github.com/fengyindong/esp32-c3-adblock>**
-> 上游原作者：<https://github.com/M-Abozaid/esp32-c3-adblock>（MIT 协议）
-
-## 🇨🇳 定制版：上游 119.29.29.29 + WiFi 持久化修复 + 运行时口令
-
-本仓库 `docs/` 里放的不是上游 2026-07-26 的预编译固件，而是**重新编译的定制固件**。相对上游改了什么：
-
-| 项目 | 上游预编译固件 | 本定制版 |
-|---|---|---|
-| DNS 上游 | Quad9 `9.9.9.9` | **119.29.29.29**（国内可达，不易被运营商劫持） |
-| WiFi 配置 | 只存 NVS；开机 30 秒没连上就掉进配网门户，门户表单又是空的 —— 看上去像"每次重启都要重新配一次" | **NVS + LittleFS 双备份**；开机 3 次 × 20 秒重试；进门户后后台每 15 秒继续重连，路由器一恢复就自己接上 |
-| 清空 WiFi 的触发 | 按住 BOOT 键 **60 毫秒**（插线时蹭一下就清空） | 按住 BOOT 键 **3 秒** |
-| 面板口令 | 编译期写死，公开仓库里人人可读 | **不内置任何可用口令**，在配网页或面板里现场设定，存设备 NVS |
-| 网络 OTA 口令 | 同上 | 同上，运行时可改 |
-| 封禁名单 | 约 5.7 万条（仓库构建时的旧快照） | **129,651 条**（官方每周一重建的周更列表） |
-| 分区表 | app 槽位 1,376,256 B —— 新版 Arduino 核心编出的固件已经装不下了 | app 槽位加宽到 **1,572,864 B**，LittleFS 相应缩到 983,040 B（上限 19.6 万条域名） |
-
-> 上游那个 7 月的预编译固件还**完全没有认证**：`/ban` `/addblock` `/upload` `/update` `/forgetwifi` 全是裸的，同网段任何设备都能改你的封禁列表、给你的设备刷固件。认证与 CSRF 防护是上游 2026-10-04 的 PR #11 才补上的。
-
-完整改动清单、实测数据与补丁文件见 **[定制版说明.md](定制版说明.md)**；源码级改动可以用 `git apply WiFi持久化补丁.diff` 复现。
-
-### 一键网页刷机
-
-1. 在仓库 **Settings → Pages** 开启 Pages（Source 选 `main` 分支、目录选 `/docs`）
-2. 用**桌面版 Chrome 或 Edge** 打开 `https://fengyindong.github.io/esp32-c3-adblock/`
-3. 点「⚡ 连接并安装」，选 ESP32-C3 的 COM 口，约 30 秒刷完
-4. 手机连上 `C3-AdBlock-XXXX` 热点，在弹出的页面里填 WiFi 密码，**顺便把「Dashboard password」和「Network OTA password」也填上**（≥6 位）
-5. 面板在 `http://c3adblock.local`，用户名 `admin`
-
-> 不想开 Pages 也能刷：把 `docs/` 里的 7 个文件下到本地，起个静态服务器（`python -m http.server`）再打开 `index.html` 即可 —— 浏览器只要求 `localhost` 属于安全上下文，不需要 HTTPS。
-
-### 校验刷机包
-
-仓库里的 `校验固件包.py` 可以先跑一遍再刷：它会解析分区表二进制、核对 manifest 偏移、并把封禁名单从 `littlefs.bin` 里逐字节还原出来，确认 100% 完整。
-
-```
-python 校验固件包.py
-```
-
-### Release 下载
-
-不想用网页刷机的，从本仓库的 **Releases** 下载完整刷机包：固件文件 + 中文刷机页 + 串口日志工具（`看日志.py`）+ 补丁 diff。
-
----
-
-## 以下为上游项目文档（中文翻译版）
+> **⚠️ 先看这一条（定制版与上游的差异）**
+>
+> 下面这一整节是**上游项目**的原文翻译。其中讲「Basic Auth 认证」「`secrets.h` 里的
+> `WEB_PASS` / `OTA_PASS`」「默认凭据 `CHANGE_ME_WEB_PASSWORD`」的部分**只适用于上游**。
+>
+> **本定制版把面板口令和网络 OTA 口令整个去掉了** —— 固件里不存在 `WEB_PASS` / `OTA_PASS`，
+> 也没有 Basic Auth 登录框，**不用去改 `secrets.h`**。留下来的只有一道 CSRF 头校验
+> （写操作必须带 `X-Requested-With: c3-adblock`），它不是认证、也不是加密。
+>
+> 代价是：局域网里任何设备都能改你的封禁列表、给板子刷进任意固件。
+> **请只在可信网络（最好放访客 / IoT 隔离网段）里用。**
 
 esp32-c3-adblock
 一个运行在 2 美元 ESP32-C3 上的 Pi-hole 风格 DNS 广告拦截器——无需 PSRAM。
