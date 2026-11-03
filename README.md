@@ -13,12 +13,16 @@
 | DNS 上游 | Quad9 `9.9.9.9` | **119.29.29.29**（国内可达，不易被运营商劫持） |
 | WiFi 配置 | 只存 NVS；开机 30 秒没连上就掉进配网门户，门户表单又是空的 —— 看上去像"每次重启都要重新配一次" | **NVS + LittleFS 双备份**；开机 3 次 × 20 秒重试；进门户后后台每 15 秒继续重连，路由器一恢复就自己接上 |
 | 清空 WiFi 的触发 | 按住 BOOT 键 **60 毫秒**（插线时蹭一下就清空） | 按住 BOOT 键 **3 秒** |
-| 面板口令 | 编译期写死，公开仓库里人人可读 | **不内置任何可用口令**，在配网页或面板里现场设定，存设备 NVS |
-| 网络 OTA 口令 | 同上 | 同上，运行时可改 |
+| 面板口令 | 编译期写死，公开仓库里人人可读 | **整个取消**，面板的增删改接口不需要任何口令 |
+| 网络 OTA 口令 | 同上 | **整个取消**，ArduinoOTA 也不设口令 |
 | 封禁名单 | 约 5.7 万条（仓库构建时的旧快照） | **129,651 条**（官方每周一重建的周更列表） |
 | 分区表 | app 槽位 1,376,256 B —— 新版 Arduino 核心编出的固件已经装不下了 | app 槽位加宽到 **1,572,864 B**，LittleFS 相应缩到 983,040 B（上限 19.6 万条域名） |
 
-> 上游那个 7 月的预编译固件**完全没有认证**：`/ban` `/addblock` `/upload` `/update` `/forgetwifi` 全是裸的，同网段任何设备都能改你的封禁列表、给你的设备刷固件。认证与 CSRF 防护是上游 2026-10-04 的 PR #11 才补上的。
+> ⚠️ **本固件没有任何口令。** 面板的增删改接口（封禁、加自定义域名、**上传固件**、改封禁列表）以及网络 OTA（ArduinoOTA）都不需要密码 —— 局域网里任何设备都能改你的配置、给你的板子刷进任意固件。**请只在可信网络（最好把板子放进访客 / IoT 隔离网段）里使用。**
+>
+> 仍然保留的一道防护：所有写操作要求请求带自定义头 `X-Requested-With: c3-adblock`，普通网页用 `<img>` 或自动提交的表单伪造不了它，**网页跨站攻击这条路是堵着的**（这不是认证，只是 CSRF 防护）。
+>
+> 顺带一提：上游那个 7 月的预编译固件**也完全没有认证**（`/ban` `/addblock` `/upload` `/update` `/forgetwifi` 全是裸的）；上游在 2026-10-04 的 PR #11 里补上了认证 + CSRF 防护，本版是**主动选择去掉**认证、只留 CSRF 那部分。
 
 完整改动清单、实测数据与补丁文件见 **[定制版说明.md](定制版说明.md)**；源码级改动可以用 `git apply WiFi持久化补丁.diff` 复现。
 
@@ -27,8 +31,8 @@
 1. 在仓库 **Settings → Pages** 开启 Pages（Source 选 `main` 分支、目录选 `/docs`）
 2. 用**桌面版 Chrome 或 Edge** 打开 `https://olddream01.github.io/esp32-c3-adblock-cn/`
 3. 点「⚡ 连接并安装」，选 ESP32-C3 的 COM 口，约 30 秒刷完
-4. 手机连上 `C3-AdBlock-XXXX` 热点，在弹出的页面里填 WiFi 密码，**顺便把「Dashboard password」和「Network OTA password」也填上**（≥6 位）
-5. 面板在 `http://c3adblock.local`，用户名 `admin`
+4. 手机连上 `C3-AdBlock-XXXX` 热点，在弹出的页面里填 WiFi 密码，点 Connect
+5. 面板在 `http://c3adblock.local`（**不需要登录**）
 
 > 不想开 Pages 也能刷：把 `docs/` 里的 7 个文件下到本地，起个静态服务器（`python -m http.server`）再打开 `index.html` 即可 —— 浏览器只要求 `localhost` 属于安全上下文，不需要 HTTPS。
 
@@ -46,7 +50,7 @@ python 校验固件包.py
 
 ```bash
 python -m pip install -U platformio
-cp src/secrets.example.h src/secrets.h      # 改里面的口令，或留空走配网页面
+cp src/secrets.example.h src/secrets.h      # 可以留空，走配网页面
 python tools/build_blocklist.py data/blocklist.bin
 pio run -e c3 -t upload
 pio run -e c3 -t uploadfs
@@ -64,6 +68,11 @@ pio run -e c3 -t uploadfs
 | [`release-assets/WiFi持久化补丁.patch`](release-assets/WiFi持久化补丁.patch) | 相对上游 HEAD 的源码补丁（+216/-43），`git apply` 直接用 |
 
 解锁 zip 后双击 `启动刷写.bat`，或把 `docs/` 里的 7 个文件单独下下来配 `manifest.json` 也能刷。
+
+---
+
+## 以下为上游项目文档（中文翻译版）
+
 
 ---
 
