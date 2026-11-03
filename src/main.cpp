@@ -24,10 +24,28 @@
 #ifndef UPSTREAM_IP
 #define UPSTREAM_IP 9, 9, 9, 9                    // Quad9
 #endif
+#ifndef UPSTREAM2_IP
+#define UPSTREAM2_IP 223, 5, 5, 5                // Aliyun — deliberately a different operator
+#endif
 #ifndef UPSTREAM_PORT
 #define UPSTREAM_PORT 53
 #endif
+// A healthy CN resolver answers in well under 50 ms; 1 s was generous enough that
+// a dead upstream stalled every query for a full second.
+#ifndef UPSTREAM_TIMEOUT_MS
+#define UPSTREAM_TIMEOUT_MS 400
+#endif
+// Wall-clock ceiling for one handleDns() pass. Without it, a dead upstream made
+// each pass burn 16 x timeout (up to 16 s) and the whole device — dashboard, OTA
+// and new queries — froze behind it.
+#ifndef DNS_BUDGET_MS
+#define DNS_BUDGET_MS 400
+#endif
 static const IPAddress UPSTREAM(UPSTREAM_IP);
+static const IPAddress UPSTREAM2(UPSTREAM2_IP);
+static const int N_UP = 2;                      // upstream resolvers raced in parallel
+static IPAddress upAddr[N_UP] = { UPSTREAM, UPSTREAM2 };
+static uint16_t upPort[N_UP] = { UPSTREAM_PORT, UPSTREAM_PORT };
 static const uint16_t DNS_PORT = 53;
 static const char* BLOCKLIST_PATH = "/blocklist.bin";
 static const int HASH_BYTES = 5;
@@ -37,7 +55,11 @@ static const int CACHE_SIZE = 256;       // must be power of 2
 static const int MAX_RANGE = 256;        // max hashes per index bucket (fine up to ~1M hashes; flash holds far fewer)
 
 // ---- globals ----
-WiFiUDP dnsServer, upstreamCli;
+WiFiUDP dnsServer;
+// One socket per upstream: a single WiFiUDP can't hold two destinations at once
+// (beginPacket rewrites the target), so racing them needs one each.
+WiFiUDP upCli[N_UP];
+uint32_t upHits[N_UP] = {0, 0}, upMiss[N_UP] = {0, 0}, upLastHit[N_UP] = {0, 0};
 WebServer web(80);
 File blocklist;
 uint32_t numHashes = 0, totalBlocked = 0, totalAllowed = 0;
@@ -240,41 +262,74 @@ static int buildBlocked(int qend, uint16_t qtype) {
   const uint8_t ans[] = {0xC0,0x0C, 0,1, 0,1, 0,0,1,0x2C, 0,4, 0,0,0,0};
   memcpy(buf + qend, ans, sizeof(ans)); return qend + sizeof(ans);
 }
-// Forward to upstream and wait for the reply that actually belongs to THIS query.
+// Forward to BOTH upstreams at once and take whichever answers first.
 // Issue #10: after one timeout the late reply used to sit in the socket and get relayed
 // to the next client (every answer shifted by one). Now: drain stale datagrams first,
 // send with a fresh random txid, and only accept a reply whose txid, question section,
 // and source address/port match. The client's own txid is restored on the way back.
+// Racing the two resolvers means a dead one costs ~0 instead of a full timeout per
+// query — and there is no "primary/backup" role to switch, the fastest answer wins.
 static int forwardUpstream(int qlen, int qend) {
-  upstreamCli.flush();                                   // release any half-read buffer
-  while (upstreamCli.parsePacket() > 0) upstreamCli.flush();   // drop stale late replies
+  for (int i = 0; i < N_UP; i++) {
+    // Reap replies that arrived after we already answered with somebody else's
+    // answer: a reply that lost the race still proves this resolver is alive, so
+    // count it before discarding it (it belongs to a query we already answered).
+    for (;;) {
+      int sz = upCli[i].parsePacket();
+      if (sz <= 0) break;
+      const bool fromUp = upCli[i].remoteIP() == upAddr[i];
+      upCli[i].flush();                           // discard: stale, question already answered
+      if (fromUp) { upHits[i]++; upMiss[i] = 0; upLastHit[i] = millis(); }
+    }
+    upCli[i].flush();                             // release any half-read buffer
+  }
   const uint8_t cid0 = buf[0], cid1 = buf[1];
-  const uint16_t wid = (uint16_t)esp_random();
+  uint16_t wid[N_UP];
+  wid[0] = (uint16_t)esp_random();
+  wid[1] = (uint16_t)esp_random();
+  if (wid[0] == wid[1]) wid[1]++;                  // distinct txids so replies can't cross
   uint8_t q[260]; int ql = qend - 12;
   const bool haveQ = ql > 0 && ql <= (int)sizeof(q) && qend <= qlen;
   if (haveQ) memcpy(q, buf + 12, ql);
-  buf[0] = wid >> 8; buf[1] = wid & 0xFF;
-  upstreamCli.beginPacket(UPSTREAM, UPSTREAM_PORT); upstreamCli.write(buf, qlen); upstreamCli.endPacket();
+  for (int i = 0; i < N_UP; i++) {                  // fire both, don't wait for either
+    buf[0] = wid[i] >> 8; buf[1] = wid[i] & 0xFF;
+    upCli[i].beginPacket(upAddr[i], upPort[i]); upCli[i].write(buf, qlen); upCli[i].endPacket();
+  }
   const uint32_t t0 = millis();
-  while (millis() - t0 < 1000) {                         // deadline, not a retry count
-    int sz = upstreamCli.parsePacket();
-    if (sz <= 0) { delay(1); continue; }
-    const bool fromUp = upstreamCli.remoteIP() == UPSTREAM && upstreamCli.remotePort() == UPSTREAM_PORT;
-    int n = upstreamCli.read(buf, sizeof(buf));
-    upstreamCli.flush();                                 // oversized datagram can't strand rx_buffer
-    if (!fromUp || n < 12 || sz > (int)sizeof(buf)) continue;
-    if (buf[0] != (wid >> 8) || buf[1] != (wid & 0xFF)) continue;
-    if (haveQ && (n < 12 + ql || memcmp(buf + 12, q, ql) != 0)) continue;
-    buf[0] = cid0; buf[1] = cid1;
-    return n;
+  while (millis() - t0 < UPSTREAM_TIMEOUT_MS) {     // deadline, not a retry count
+    for (int i = 0; i < N_UP; i++) {
+      int sz = upCli[i].parsePacket();
+      if (sz <= 0) continue;
+      const bool fromUp = upCli[i].remoteIP() == upAddr[i] && upCli[i].remotePort() == upPort[i];
+      int n = upCli[i].read(buf, sizeof(buf));
+      upCli[i].flush();                             // oversized datagram can't strand rx_buffer
+      if (!fromUp || n < 12 || sz > (int)sizeof(buf)) continue;
+      if (buf[0] != (wid[i] >> 8) || buf[1] != (wid[i] & 0xFF)) continue;
+      if (haveQ && (n < 12 + ql || memcmp(buf + 12, q, ql) != 0)) continue;
+      buf[0] = cid0; buf[1] = cid1;
+      upHits[i]++; upMiss[i] = 0; upLastHit[i] = millis();
+      return n;
+    }
+    delay(1);
+  }
+  for (int i = 0; i < N_UP; i++) {                  // nobody answered in time
+    upMiss[i]++;
+    if (upMiss[i] == 1 || upMiss[i] % 50 == 0)
+      Serial.printf("[dns] upstream %s: no reply (%u consecutive failures)\n",
+                    upAddr[i].toString().c_str(), (unsigned)upMiss[i]);
   }
   return 0;
 }
 // Drain a whole RX burst per call (capped, so web/OTA still get a turn) instead of
 // one packet per loop iteration. Returns true if any query was handled this call.
+// The time cap matters as much as the packet cap: with one dead upstream a pass used
+// to cost 16 x timeout (up to 16 s), and during that window the dashboard, OTA and
+// every newly arriving DNS query were all locked out — the box looked dead.
 static bool handleDns() {
   bool did = false;
+  const uint32_t t0 = millis();
   for (int budget = 0; budget < 16; budget++) {
+    if (millis() - t0 >= DNS_BUDGET_MS) break;   // hand the CPU back to web/OTA
     int sz = dnsServer.parsePacket(); if (sz <= 0) break;
     did = true;
     IPAddress cip = dnsServer.remoteIP(); uint16_t cport = dnsServer.remotePort();
@@ -318,6 +373,21 @@ static String htmlEscape(const String& s) {
 
 #include "page.h"   // dashboard HTML (PROGMEM) — see issue #6
 
+// Per-upstream health for the dashboard: how many answers each resolver
+// produced, how many it missed, and whether it answered recently. This is the
+// quickest way to tell "the resolver is down" from "something is hijacking 53".
+static String upsJson() {
+  String s;
+  for (int i = 0; i < N_UP; i++) {
+    const bool alive = upLastHit[i] && (millis() - upLastHit[i]) < 30000;
+    if (i) s += ",";
+    s += "{\"ip\":\"" + upAddr[i].toString() + "\",\"ok\":" + (uint32_t)upHits[i] +
+         ",\"fail\":" + (uint32_t)upMiss[i] + ",\"alive\":" + (alive ? "true" : "false") +
+         ",\"last\":" + (uint32_t)(upLastHit[i] ? (millis() - upLastHit[i]) / 1000 : 0) + "}";
+  }
+  return s;
+}
+
 static void handleStats() {
   uint32_t up = millis() / 1000;
   char ut[24]; snprintf(ut, sizeof(ut), "%lud %luh %lum", up/86400, (up%86400)/3600, (up%3600)/60);
@@ -327,7 +397,7 @@ static void handleStats() {
              ",\"upurl\":\"" + jesc(updateUrl) + "\",\"upiv\":" + updateIntervalH + ",\"upstat\":\"" + jesc(updateStatus) + "\"" +
              ",\"blocking\":" + (blockingOn ? "true" : "false") +
              ",\"resumeIn\":" + (uint32_t)(!blockingOn && resumeAt ? (resumeAt - millis()) / 1000 : 0) +
-             ",\"upstream\":\"" + jesc(UPSTREAM.toString()) + "\"" +
+             ",\"upstream\":\"" + jesc(upAddr[0].toString()) + "\",\"ups\":[" + upsJson() + "]" +
              ",\"clients\":[";
   for (int i = 0; i < numClients; i++) { Dev& c = clients[i]; IPAddress ip(c.ip);
     j += (i ? "," : ""); j += "{\"ip\":\"" + ip.toString() + "\",\"mac\":\"" + macStr(c.mac) + "\",\"blocked\":" + c.blocked + ",\"allowed\":" + c.allowed + ",\"banned\":" + (c.banned?"true":"false") + "}"; }
@@ -687,11 +757,13 @@ void setup() {
 
   if (!connectWiFi()) startConfigPortal();   // portal blocks + reboots on save; returns only when connected
   Serial.printf("WiFi up: %s\n", WiFi.localIP().toString().c_str());
-  Serial.printf("upstream DNS: %s:%u\n", UPSTREAM.toString().c_str(), (unsigned)UPSTREAM_PORT);
+  Serial.printf("upstream DNS: %s:%u", UPSTREAM.toString().c_str(), (unsigned)UPSTREAM_PORT);
+  Serial.printf("  |  %s:%u\n", UPSTREAM2.toString().c_str(), (unsigned)UPSTREAM_PORT);
   if (MDNS.begin("c3adblock")) { MDNS.addService("http", "tcp", 80); Serial.println("dashboard: http://c3adblock.local"); }
 
 
-  dnsServer.begin(DNS_PORT); upstreamCli.begin(0);
+  dnsServer.begin(DNS_PORT);
+  for (int i = 0; i < N_UP; i++) upCli[i].begin(0);   // one socket per upstream
   { const char* hdrs[] = { CSRF_HEADER }; web.collectHeaders(hdrs, 1); }  // needed for requireCsrf()'s CSRF check
   web.on("/", []() { web.send_P(200, "text/html", PAGE); });
   web.on("/stats.json", handleStats);

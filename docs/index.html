@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>C3 AdBlock 定制版 · 刷机页</title>
-<meta name="description" content="ESP32-C3 全网广告拦截器 · 国内上游 119.29.29.29 · WiFi 配置持久化修复版">
+<meta name="description" content="ESP32-C3 全网广告拦截器 · 双路上游 DNS · WiFi 配置持久化修复版">
 <script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
 <style>
   :root { color-scheme: dark; }
@@ -49,7 +49,7 @@
     <div class="flags">
       <span class="flag">Chrome / Edge 桌面版</span>
       <span class="flag">约 30 秒</span>
-      <span class="flag">上游 119.29.29.29</span>
+      <span class="flag">双路上游 DNS</span>
       <span class="flag">WiFi 不再丢</span>
     </div>
   </div>
@@ -57,7 +57,7 @@
   <div class="card new">
     <b>✅ 这版相对官方预编译固件改了什么</b>
     <table>
-      <tr><th>上游 DNS</th><td>Quad9 <code>9.9.9.9</code> → <span class="key">DNSPod <code>119.29.29.29</code></span>（国内可达，不易被劫持）</td></tr>
+      <tr><th>上游 DNS</th><td>Quad9 <code>9.9.9.9</code> 单点 → <span class="key">DNSPod <code>119.29.29.29</code> + 阿里 <code>223.5.5.5</code></span><br><b>双路并发竞速</b>，谁先答用谁；一方挂了另一方顶上，超时也从 1 秒收紧到 400 ms</td></tr>
       <tr><th>WiFi 持久化</th><td>凭据<b>双备份</b>：NVS + LittleFS <code>/wifi.cfg</code>；NVS 丢了会自动从备份恢复并回写</td></tr>
       <tr><th>重启后重连</th><td>开机连网改 <b>3 次 × 20 秒</b>重试；连不上时后台每 15 秒继续重试，路由器一恢复就自己接上</td></tr>
       <tr><th>误触 BOOT</th><td>清空 WiFi 的触发条件从「按住 60 毫秒」改成<b>按住 3 秒</b>，插线时蹭到按钮不再清空</td></tr>

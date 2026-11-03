@@ -10,7 +10,7 @@
 
 | 项目 | 上游预编译固件 | 本定制版 |
 |---|---|---|
-| DNS 上游 | Quad9 `9.9.9.9` | **119.29.29.29**（国内可达，不易被运营商劫持） |
+| DNS 上游 | Quad9 `9.9.9.9`，单点，一挂全挂 | **119.29.29.29 + 223.5.5.5 双路并发竞速**（DNSPod + 阿里，国内可达；谁先答用谁，一方挂了另一方顶上） |
 | WiFi 配置 | 只存 NVS；开机 30 秒没连上就掉进配网门户，门户表单又是空的 —— 看上去像"每次重启都要重新配一次" | **NVS + LittleFS 双备份**；开机 3 次 × 20 秒重试；进门户后后台每 15 秒继续重连，路由器一恢复就自己接上 |
 | 清空 WiFi 的触发 | 按住 BOOT 键 **60 毫秒**（插线时蹭一下就清空） | 按住 BOOT 键 **3 秒** |
 | 面板口令 | 编译期写死，公开仓库里人人可读 | **整个取消**，面板的增删改接口不需要任何口令 |
@@ -56,7 +56,7 @@ pio run -e c3 -t upload
 pio run -e c3 -t uploadfs
 ```
 
-改上游 DNS 只要改 `platformio.ini` 里的 `-DUPSTREAM_IP=`。
+改上游 DNS 改 `platformio.ini` 里的 `-DUPSTREAM_IP=` 和 `-DUPSTREAM2_IP=` —— 两个地址会**并发竞速**，谁先答用谁。
 
 ### 直接下载
 
@@ -64,7 +64,7 @@ pio run -e c3 -t uploadfs
 
 | 文件 | 说明 |
 |---|---|
-| [**Releases 页**](https://github.com/Olddream01/esp32-c3-adblock-cn/releases) | 版本化的下载入口，最新的是 `v2.0.0-cn` |
+| [**Releases 页**](https://github.com/Olddream01/esp32-c3-adblock-cn/releases) | 版本化的下载入口，最新的是 `v2.1.0-cn`（双路上游 DNS） |
 | [`release-assets/C3-AdBlock-定制版-119DNS.zip`](release-assets/C3-AdBlock-定制版-119DNS.zip) | 完整刷机包（2.1 MB）：固件文件 + 中文刷机页 + 一键启动脚本 + 串口日志工具 + 使用说明 |
 | [`release-assets/WiFi持久化补丁.patch`](release-assets/WiFi持久化补丁.patch) | 相对上游 HEAD 的源码补丁（+173/-64），`git apply` 直接用 |
 
