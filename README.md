@@ -64,10 +64,13 @@ pio run -e c3 -t uploadfs
 
 | 文件 | 说明 |
 |---|---|
+| [**Releases 页**](https://github.com/Olddream01/esp32-c3-adblock-cn/releases) | 版本化的下载入口，最新的是 `v2.0.0-cn` |
 | [`release-assets/C3-AdBlock-定制版-119DNS.zip`](release-assets/C3-AdBlock-定制版-119DNS.zip) | 完整刷机包（2.1 MB）：固件文件 + 中文刷机页 + 一键启动脚本 + 串口日志工具 + 使用说明 |
 | [`release-assets/WiFi持久化补丁.patch`](release-assets/WiFi持久化补丁.patch) | 相对上游 HEAD 的源码补丁（+173/-64），`git apply` 直接用 |
 
 解锁 zip 后双击 `启动刷写.bat`，或把 `docs/` 里的 7 个文件单独下下来配 `manifest.json` 也能刷。
+
+> Release 附件用的是纯 ASCII 文件名（`C3-AdBlock-Custom-119DNS.zip`、`WiFi-Persistence-Patch.patch` / `.diff`）—— GitHub 会把 Release 附件名里的中文替换成 `.`，所以两边名字不同，**内容完全一致**。
 
 ---
 
