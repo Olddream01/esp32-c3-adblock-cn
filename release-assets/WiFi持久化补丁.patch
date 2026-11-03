@@ -1,112 +1,81 @@
-ESP32-C3 AdBlock 定制补丁
-==========================
-基线 : M-Abozaid/esp32-c3-adblock  main 分支 (HEAD 238ef7b, 2026-10-06)
-改动 : +216 / -43 行, 动了 src/main.cpp / src/page.h / platformio.ini / partitions.csv
-
-一、WiFi 持久化修复
-  1. 凭据双备份 (NVS + LittleFS /wifi.cfg)，NVS 丢了自动恢复并回写
-  2. 开机连网 3 次 x 20 秒重试；失败进门户后后台每 15 秒继续重试
-  3. 配网页自动预填已保存的 SSID
-  4. 清空 WiFi 的 BOOT 触发改为按住 3 秒（原来 60 毫秒，插线蹭到就清空）
-  5. 运行中掉线自动重连
-
-二、上游 DNS
-  6. 改为 119.29.29.29 (build flag)，启动日志与面板显示当前上游
-
-三、运行时口令（公开分发必备）
-  7. 面板口令 / OTA 口令改为运行时设定，存 NVS namespace "sec"
-  8. 新增 /setpass 与 /setotapass 端点
-  9. 配网页新增两个可选口令输入框；面板新增 SECURITY 一栏
-  10. 编译期不内置任何可用密码，公开分发不会变成"谁都能改你的设备"
-
-四、分区表
-  11. app 槽位 0x150000 -> 0x180000，LittleFS 0x150000 -> 0x0F0000
-      (Arduino 核心 3.3.12 编出的固件 1,510,160 B 装不进原来的 1,376,256 B 槽位)
-      注意: 刷机 manifest 的 littlefs 偏移要同步改成 0x310000
-
-用法
-  git apply WiFi持久化补丁.diff
-  然后改 src/secrets.h（可留空，运行时设口令），再 pio run -e c3
-
 --- a/src/main.cpp
 +++ b/src/main.cpp
-@@ -70,6 +70,38 @@
+@@ -70,6 +70,7 @@
  Preferences prefs;
  DNSServer   dnsPortal;
  String      portalOpts;             // <option> list of scanned networks, built once at portal start
 +String      savedSsid, savedPass;   // last known network, kept so the portal can prefill it and retry on its own
-+String      dashPass, otaPassR;    // runtime credentials; empty = fall back to the compile-time secrets.h values
-+
-+// ---------- runtime credentials ----------
-+// A publicly shared build ships with the placeholder WEB_PASS/OTA_PASS that
-+// everybody can read in the repo, so the real passwords are set at runtime --
-+// on the setup portal or from the dashboard -- and kept in NVS ("sec").
-+// The compile-time values are only the fallback.
-+static const char* activeWebPass() { return dashPass.length() ? dashPass.c_str() : WEB_PASS; }
-+static const char* activeOtaPass() { return otaPassR.length() ? otaPassR.c_str() : OTA_PASS; }
-+
-+static void loadRuntimeCreds() {
-+  prefs.begin("sec", true);
-+  dashPass = prefs.getString("web", "");
-+  otaPassR = prefs.getString("ota", "");
-+  prefs.end();
-+  Serial.printf("[sec] dashboard password: %s | OTA password: %s\n",
-+                dashPass.length() ? "set on device" : "compile-time default",
-+                otaPassR.length() ? "set on device" : "compile-time default");
-+}
-+static bool saveRuntimeCred(const char* key, const String& val, String& cache) {
-+  prefs.begin("sec", false); prefs.putString(key, val); prefs.end();
-+  prefs.begin("sec", true); String back = prefs.getString(key, ""); prefs.end();
-+  if (back != val) { Serial.printf("[sec] WARN: NVS write failed for %s\n", key); return false; }
-+  cache = val;
-+  return true;
-+}
-+static bool usingDefaultCreds() {
-+  bool webDefault = !dashPass.length() && strcmp(WEB_PASS, "CHANGE_ME_WEB_PASSWORD") == 0;
-+  bool otaDefault = !otaPassR.length() && strcmp(OTA_PASS, "CHANGE_ME_OTA_PASSWORD") == 0;
-+  return webDefault || otaDefault;
-+}
  
  // blocking pause (Pi-hole-style "disable for a while")
  bool     blockingOn = true;
-@@ -326,7 +358,8 @@
+@@ -326,7 +327,7 @@
               ",\"upurl\":\"" + jesc(updateUrl) + "\",\"upiv\":" + updateIntervalH + ",\"upstat\":\"" + jesc(updateStatus) + "\"" +
               ",\"blocking\":" + (blockingOn ? "true" : "false") +
               ",\"resumeIn\":" + (uint32_t)(!blockingOn && resumeAt ? (resumeAt - millis()) / 1000 : 0) +
 -             ",\"defcreds\":" + ((strcmp(WEB_PASS, "CHANGE_ME_WEB_PASSWORD") == 0 || strcmp(OTA_PASS, "CHANGE_ME_OTA_PASSWORD") == 0) ? "true" : "false") +
-+             ",\"defcreds\":" + (usingDefaultCreds() ? "true" : "false") +
 +             ",\"upstream\":\"" + jesc(UPSTREAM.toString()) + "\"" +
               ",\"clients\":[";
    for (int i = 0; i < numClients; i++) { Dev& c = clients[i]; IPAddress ip(c.ip);
      j += (i ? "," : ""); j += "{\"ip\":\"" + ip.toString() + "\",\"mac\":\"" + macStr(c.mac) + "\",\"blocked\":" + c.blocked + ",\"allowed\":" + c.allowed + ",\"banned\":" + (c.banned?"true":"false") + "}"; }
-@@ -352,7 +385,7 @@
+@@ -350,14 +351,16 @@
+ // drive-by case without needing TLS, cookies, or a token endpoint.
+ static const char* CSRF_HEADER = "X-Requested-With";
  static const char* CSRF_VALUE  = "c3-adblock";
- static bool requireAuth() {
+-static bool requireAuth() {
++// No username/password on the dashboard: this build is meant for a trusted
++// LAN only. What is still enforced is the custom header -- a plain <img> or
++// auto-submitted <form> from a random website cannot attach it, so drive-by
++// CSRF against this device stays blocked even without credentials.
++static bool requireCsrf() {
    if (web.header(CSRF_HEADER) != CSRF_VALUE) { web.send(403, "text/plain", "missing CSRF header"); return false; }
 -  if (web.authenticate(WEB_USER, WEB_PASS)) return true;
-+  if (web.authenticate(WEB_USER, activeWebPass())) return true;
-   web.requestAuthentication();
-   return false;
+-  web.requestAuthentication();
+-  return false;
++  return true;
  }
-@@ -399,7 +432,7 @@
+ static void handleBan() {
+-  if (!requireAuth()) return;
++  if (!requireCsrf()) return;
+   IPAddress ip; if (ip.fromString(web.arg("ip"))) { Dev* c = getClient((uint32_t)ip); if (c) { c->banned = !c->banned; saveBanned(); } }
+   web.send(200, "text/plain", "ok");
+ }
+@@ -391,7 +394,7 @@
+ static bool upAuthOk = false;
+ static File upFile;
+ static void handleUploadDone() {
+-  if (!upAuthOk) { web.requestAuthentication(); return; }
++  if (!upAuthOk) { web.send(403, "text/plain", "missing CSRF header"); return; }
+   web.send(upOk ? 200 : 500, "text/plain",
+            upOk ? "ok" : "rejected: empty or size not a multiple of 5 (not a blocklist.bin?)");
+ }
+@@ -399,7 +402,7 @@
    HTTPUpload& u = web.upload();
    switch (u.status) {
      case UPLOAD_FILE_START:
 -      upAuthOk = web.header(CSRF_HEADER) == CSRF_VALUE && web.authenticate(WEB_USER, WEB_PASS);
-+      upAuthOk = web.header(CSRF_HEADER) == CSRF_VALUE && web.authenticate(WEB_USER, activeWebPass());
++      upAuthOk = web.header(CSRF_HEADER) == CSRF_VALUE;
        if (!upAuthOk) { Serial.println("[ota] blocklist upload: auth/CSRF check failed"); break; }
        upOk = false; beginBlocklistSwap();
        upFile = LittleFS.open("/blocklist.new", "w");
-@@ -473,7 +506,7 @@
+@@ -465,7 +468,7 @@
+ // ---------- firmware OTA (browser upload of firmware.bin -> reboot) ----------
+ static bool fwAuthOk = false;
+ static void handleFwUpdateDone() {
+-  if (!fwAuthOk) { web.requestAuthentication(); return; }
++  if (!fwAuthOk) { web.send(403, "text/plain", "missing CSRF header"); return; }
+   bool ok = !Update.hasError();
+   web.send(ok ? 200 : 500, "text/plain", ok ? "ok, rebooting" : "firmware update failed");
+   if (ok) { delay(300); ESP.restart(); }
+@@ -473,7 +476,7 @@
  static void handleFwUpload() {
    HTTPUpload& u = web.upload();
    if (u.status == UPLOAD_FILE_START) {
 -    fwAuthOk = web.header(CSRF_HEADER) == CSRF_VALUE && web.authenticate(WEB_USER, WEB_PASS);
-+    fwAuthOk = web.header(CSRF_HEADER) == CSRF_VALUE && web.authenticate(WEB_USER, activeWebPass());
++    fwAuthOk = web.header(CSRF_HEADER) == CSRF_VALUE;
      if (!fwAuthOk) { Serial.println("[fw-ota] auth/CSRF check failed, rejecting flash"); return; }
      Serial.printf("[fw-ota] %s\n", u.filename.c_str());
      if (!Update.begin(UPDATE_SIZE_UNKNOWN)) Update.printError(Serial);
-@@ -491,30 +524,93 @@
+@@ -491,30 +494,93 @@
  }
  
  // ---------- WiFi provisioning (captive portal) ----------
@@ -217,7 +186,7 @@ ESP32-C3 AdBlock 定制补丁
    String html =
      "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
      "<title>C3 AdBlock setup</title>"
-@@ -522,9 +618,12 @@
+@@ -522,9 +588,10 @@
      "<h2>&#128737; C3 AdBlock &mdash; WiFi setup</h2>"
      "<p style='color:#8b949e'>Pick your network and enter its password. The device restarts and joins it.</p>"
      "<form method=POST action=/wifisave>"
@@ -226,13 +195,11 @@ ESP32-C3 AdBlock 定制补丁
      "<datalist id=nets>" + portalOpts + "</datalist>"
 -    "<input name=p type=password placeholder='Password' style='width:100%;box-sizing:border-box;padding:11px;margin:6px 0;border-radius:6px;border:1px solid #30363d;background:#161b22;color:#c9d1d9'>"
 +    "<input name=p type=password placeholder='WiFi password' style='width:100%;box-sizing:border-box;padding:11px;margin:6px 0;border-radius:6px;border:1px solid #30363d;background:#161b22;color:#c9d1d9'>"
-+    "<input name=dp type=password placeholder='Dashboard password (optional, min 6 chars)' style='width:100%;box-sizing:border-box;padding:11px;margin:6px 0;border-radius:6px;border:1px solid #30363d;background:#161b22;color:#c9d1d9'>"
-+    "<input name=op type=password placeholder='Network OTA password (optional, min 6 chars)' style='width:100%;box-sizing:border-box;padding:11px;margin:6px 0;border-radius:6px;border:1px solid #30363d;background:#161b22;color:#c9d1d9'>"
 +    + saved +
      "<button style='width:100%;padding:12px;margin-top:8px;border-radius:6px;border:0;background:#3fb950;color:#000;font-weight:600;cursor:pointer'>Connect</button>"
      "</form></body>";
    web.send(200, "text/html", html);
-@@ -532,7 +631,13 @@
+@@ -532,7 +599,10 @@
  static void handleWifiSave() {
    String ss = web.arg("s"), pw = web.arg("p");
    if (!ss.length()) { web.send(400, "text/plain", "missing WiFi name"); return; }
@@ -241,13 +208,10 @@ ESP32-C3 AdBlock 定制补丁
 +  savedSsid = ss; savedPass = pw;
 +  // Optional: let the user set the dashboard / OTA password right here, so a
 +  // publicly shared build never has to ship a usable password in the binary.
-+  String dp = web.arg("dp"), op = web.arg("op");
-+  if (dp.length() >= 6) saveRuntimeCred("web", dp, dashPass);
-+  if (op.length() >= 6) saveRuntimeCred("ota", op, otaPassR);
    web.send(200, "text/html", "<!doctype html><meta charset=utf-8><body style='font:16px system-ui;text-align:center;margin-top:60px'>"
                               "&#9989; Saved. Restarting and joining <b>" + htmlEscape(ss) + "</b>&hellip;<br><br>"
                               "Reconnect your phone to your normal WiFi, then find the box at <b>c3adblock.local</b>.</body>");
-@@ -545,7 +650,10 @@
+@@ -545,7 +615,10 @@
    for (int i = 0; i < n && i < 15; i++) portalOpts += "<option value='" + htmlEscape(WiFi.SSID(i)) + "'>";
    uint8_t mac[6]; WiFi.macAddress(mac);
    char ap[24]; snprintf(ap, sizeof(ap), "C3-AdBlock-%02X%02X", mac[4], mac[5]);
@@ -259,7 +223,7 @@ ESP32-C3 AdBlock 定制补丁
    IPAddress apIP = WiFi.softAPIP();
    dnsPortal.start(53, "*", apIP);              // catch-all -> phones pop the captive portal
    web.on("/", handlePortalRoot);
-@@ -554,14 +662,28 @@
+@@ -554,14 +627,28 @@
    web.begin();
    Serial.printf("\n[setup] No WiFi. Join open network \"%s\" and a setup page pops up (or http://%s)\n",
                  ap, apIP.toString().c_str());
@@ -293,15 +257,7 @@ ESP32-C3 AdBlock 定制补丁
    }
  }
  
-@@ -576,6 +698,7 @@
-     buildFlashIndex();
-   }
-   loadCustom(); loadBanned(); loadUpdateCfg();
-+  loadRuntimeCreds();                       // runtime dashboard/OTA passwords (NVS "sec")
-   Serial.printf("custom: %d, banned: %d\n", numCustom, numBanned);
- 
-   // Hold BOOT at power-on to wipe saved WiFi and force the setup portal.
-@@ -585,12 +708,22 @@
+@@ -585,47 +672,52 @@
    const int BOOT_PIN = 0;     // classic ESP32 BOOT button (GPIO9 is a flash pin there)
  #endif
    pinMode(BOOT_PIN, INPUT_PULLUP);
@@ -326,46 +282,52 @@ ESP32-C3 AdBlock 定制补丁
 +  Serial.printf("upstream DNS: %s:%u\n", UPSTREAM.toString().c_str(), (unsigned)UPSTREAM_PORT);
    if (MDNS.begin("c3adblock")) { MDNS.addService("http", "tcp", 80); Serial.println("dashboard: http://c3adblock.local"); }
  
-   if (strcmp(WEB_PASS, "CHANGE_ME_WEB_PASSWORD") == 0 || strcmp(OTA_PASS, "CHANGE_ME_OTA_PASSWORD") == 0)
-@@ -605,6 +738,19 @@
+-  if (strcmp(WEB_PASS, "CHANGE_ME_WEB_PASSWORD") == 0 || strcmp(OTA_PASS, "CHANGE_ME_OTA_PASSWORD") == 0)
+-    Serial.println("[WARN] secrets.h still has placeholder WEB_PASS/OTA_PASS — those are public "
+-                    "(they're in the repo's example file). Set real values before trusting this "
+-                    "device on a network you don't fully control.");
+ 
+   dnsServer.begin(DNS_PORT); upstreamCli.begin(0);
+-  { const char* hdrs[] = { CSRF_HEADER }; web.collectHeaders(hdrs, 1); }  // needed for requireAuth()'s CSRF check
++  { const char* hdrs[] = { CSRF_HEADER }; web.collectHeaders(hdrs, 1); }  // needed for requireCsrf()'s CSRF check
+   web.on("/", []() { web.send_P(200, "text/html", PAGE); });
+   web.on("/stats.json", handleStats);
    web.on("/ban", handleBan);
-   web.on("/addblock", []() { if (!requireAuth()) return; addCustom(web.arg("d")); web.send(200, "text/plain", "ok"); });
-   web.on("/unblock", []() { if (!requireAuth()) return; removeCustom(web.arg("d")); web.send(200, "text/plain", "ok"); });
-+  web.on("/setpass", []() {           // set the dashboard password at runtime (NVS)
-+    if (!requireAuth()) return;
-+    String p = web.arg("p");
-+    if (p.length() < 6) { web.send(400, "text/plain", "too short (min 6 chars)"); return; }
-+    web.send(200, "text/plain", saveRuntimeCred("web", p, dashPass) ? "ok" : "failed to persist");
-+  });
-+  web.on("/setotapass", []() {        // set the network-OTA password at runtime (NVS)
-+    if (!requireAuth()) return;
-+    String p = web.arg("p");
-+    if (p.length() < 6) { web.send(400, "text/plain", "too short (min 6 chars)"); return; }
-+    if (saveRuntimeCred("ota", p, otaPassR)) { ArduinoOTA.setPassword(activeOtaPass()); web.send(200, "text/plain", "ok"); }
-+    else web.send(500, "text/plain", "failed to persist");
-+  });
+-  web.on("/addblock", []() { if (!requireAuth()) return; addCustom(web.arg("d")); web.send(200, "text/plain", "ok"); });
+-  web.on("/unblock", []() { if (!requireAuth()) return; removeCustom(web.arg("d")); web.send(200, "text/plain", "ok"); });
++  web.on("/addblock", []() { if (!requireCsrf()) return; addCustom(web.arg("d")); web.send(200, "text/plain", "ok"); });
++  web.on("/unblock", []() { if (!requireCsrf()) return; removeCustom(web.arg("d")); web.send(200, "text/plain", "ok"); });
    web.on("/pause", []() {                    // /pause?s=300  (0 or absent = indefinite)
-     if (!requireAuth()) return;
+-    if (!requireAuth()) return;
++    if (!requireCsrf()) return;
      long s = web.hasArg("s") ? web.arg("s").toInt() : 0;
-@@ -613,7 +759,7 @@
+     blockingOn = false; resumeAt = (s > 0) ? millis() + (uint32_t)s * 1000UL : 0;
+     web.send(200, "text/plain", "paused");
    });
-   web.on("/resume", []() { if (!requireAuth()) return; blockingOn = true; resumeAt = 0; web.send(200, "text/plain", "resumed"); });
-   web.on("/forgetwifi", []() { if (!requireAuth()) return; web.send(200, "text/plain", "cleared — rebooting into setup portal");
+-  web.on("/resume", []() { if (!requireAuth()) return; blockingOn = true; resumeAt = 0; web.send(200, "text/plain", "resumed"); });
+-  web.on("/forgetwifi", []() { if (!requireAuth()) return; web.send(200, "text/plain", "cleared — rebooting into setup portal");
 -    prefs.begin("wifi", false); prefs.clear(); prefs.end(); delay(500); ESP.restart(); });
++  web.on("/resume", []() { if (!requireCsrf()) return; blockingOn = true; resumeAt = 0; web.send(200, "text/plain", "resumed"); });
++  web.on("/forgetwifi", []() { if (!requireCsrf()) return; web.send(200, "text/plain", "cleared — rebooting into setup portal");
 +    prefs.begin("wifi", false); prefs.clear(); prefs.end(); LittleFS.remove(WIFI_BACKUP_PATH); delay(500); ESP.restart(); });
    web.on("/upload", HTTP_POST, handleUploadDone, handleUpload);      // blocklist OTA (auth inside handleUpload)
    web.on("/update", HTTP_POST, handleFwUpdateDone, handleFwUpload);  // firmware OTA (auth inside handleFwUpload)
-   web.on("/fetchnow", []() { if (!requireAuth()) return; fetchBlocklist(updateUrl); web.send(200, "text/plain", updateStatus); });
-@@ -625,7 +771,7 @@
+-  web.on("/fetchnow", []() { if (!requireAuth()) return; fetchBlocklist(updateUrl); web.send(200, "text/plain", updateStatus); });
++  web.on("/fetchnow", []() { if (!requireCsrf()) return; fetchBlocklist(updateUrl); web.send(200, "text/plain", updateStatus); });
+   web.on("/setupdate", []() {
+-    if (!requireAuth()) return;
++    if (!requireCsrf()) return;
+     if (web.hasArg("u")) updateUrl = web.arg("u");
+     if (web.hasArg("h")) { updateIntervalH = web.arg("h").toInt(); if (updateIntervalH < 1) updateIntervalH = 1; }
+     saveUpdateCfg(); web.send(200, "text/plain", "ok");
    });
    web.begin();
    ArduinoOTA.setHostname("c3adblock");   // pio run -t upload --upload-port c3adblock.local
 -  ArduinoOTA.setPassword(OTA_PASS);      // network OTA was unauthenticated upstream
-+  ArduinoOTA.setPassword(activeOtaPass());      // network OTA was unauthenticated upstream
    ArduinoOTA.begin();
    Serial.println("DNS :53 + dashboard :80 + OTA up");
  }
-@@ -634,6 +780,12 @@
+@@ -634,6 +726,12 @@
    ArduinoOTA.handle();
    web.handleClient();
    bool busy = handleDns();
@@ -380,27 +342,23 @@ ESP32-C3 AdBlock 定制补丁
      uint32_t now = millis();
 --- a/src/page.h
 +++ b/src/page.h
-@@ -20,7 +20,7 @@
+@@ -19,9 +19,6 @@
+ h2{font-size:14px;color:#8b949e;margin:18px 0 8px}
  </style></head><body>
  <header><h1>🛡️ C3 AdBlock <span id=host></span></h1></header><div class=wrap>
- <div id=credwarn style="display:none;background:#3b1d1d;border:1px solid #f85149;color:#ffb3ae;border-radius:8px;padding:10px 14px;margin-bottom:14px;font-size:13px">
+-<div id=credwarn style="display:none;background:#3b1d1d;border:1px solid #f85149;color:#ffb3ae;border-radius:8px;padding:10px 14px;margin-bottom:14px;font-size:13px">
 -⚠️ <b>Default credentials in use.</b> WEB_PASS/OTA_PASS in <code>secrets.h</code> are still the placeholder values — anyone can read them in the public repo. Set real values and reflash.
-+⚠️ <b>Default credentials in use.</b> The compile-time WEB_PASS/OTA_PASS are still the placeholder values that ship in the public repo. Set your own below &mdash; they are stored <i>on the device</i> in NVS and survive reboots, so the public default stops mattering.
- </div>
+-</div>
  <div id=blockbar style="display:flex;align-items:center;gap:12px;margin-bottom:14px;padding:12px 14px;background:#161b22;border:1px solid #30363d;border-radius:8px">
  <span id=blockdot style=font-size:20px>🛡️</span><b id=blockstate style=flex:1 data-on=1>Blocking active</b>
-@@ -41,6 +41,10 @@
- <h2>FIRMWARE &mdash; OTA UPDATE</h2>
- <form id=fwf style=margin-bottom:6px><input type=file id=fwb accept=.bin><button>Flash firmware</button> <span id=fwmsg style=color:#8b949e></span></form>
- <div style="color:#8b949e;font-size:12px;margin-bottom:18px">upload <code>.pio/build/c3/firmware.bin</code> &mdash; device verifies it and reboots into it</div>
-+<h2>SECURITY &mdash; PASSWORDS</h2>
-+<div style=margin-bottom:6px><input id=npw type=password placeholder="new dashboard password (min 6 chars)" size=28> <button onclick=setPass()>Set dashboard password</button> <span id=pwmsg style=color:#8b949e></span></div>
-+<div style=margin-bottom:6px><input id=notp type=password placeholder="new network OTA password (min 6 chars)" size=28> <button onclick=setOtaPass()>Set OTA password</button> <span id=otamsg style=color:#8b949e></span></div>
-+<div style="color:#8b949e;font-size:12px;margin-bottom:18px">stored on the device in NVS &mdash; survives reboots and blocklist updates, and needs no reflash</div>
- <h2>WIFI</h2>
- <div style=margin-bottom:18px><button onclick="if(confirm('Forget saved WiFi and reboot into the setup portal?'))forgetWifi()">Forget WiFi</button></div>
- </div><script>
-@@ -60,7 +64,7 @@
+ <select id=pausedur style="background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:5px;padding:5px"><option value=30>30s</option><option value=300 selected>5 min</option><option value=1800>30 min</option><option value=0>until I re-enable</option></select>
+@@ -54,13 +51,12 @@
+ function togglePause(){fetch(blockstate.dataset.on=='1'?'/pause?s='+pausedur.value:'/resume',{headers:CSRF_HDRS}).then(load);}
+ async function load(){let s=await(await fetch('/stats.json')).json();
+ host.textContent='@ '+s.ip;
+-credwarn.style.display=s.defcreds?'block':'none';
+ let on=s.blocking!==false;blockstate.dataset.on=on?'1':'0';
+ blockdot.textContent=on?'🛡️':'⏸️';blockbar.style.borderColor=on?'#30363d':'#f0883e';
  blockstate.textContent=on?'Blocking active':(s.resumeIn>0?'Paused — resumes in '+s.resumeIn+'s':'Paused');
  pausebtn.textContent=on?'Pause':'Resume';pausedur.style.display=on?'':'none';
  sys.innerHTML=[['Total blocked',fmt(s.blocked),'b'],['Total allowed',fmt(s.allowed),'a'],['Blocklist',fmt(s.domains)+' domains',''],
@@ -409,15 +367,6 @@ ESP32-C3 AdBlock 定制补丁
  .map(c=>`<div class=card><div class="v ${c[2]}">${c[1]}</div><div class=l>${c[0]}</div></div>`).join('');
  ct.tBodies[0].innerHTML=s.clients.sort((a,b)=>(b.blocked+b.allowed)-(a.blocked+a.allowed)).map(c=>
  `<tr><td>${c.ip}${c.banned?' <span class=tag style=color:#f85149>BANNED</span>':''}</td><td>${c.mac}</td>
-@@ -76,6 +80,8 @@
- function saveUpd(){fetch('/setupdate?u='+encodeURIComponent(uurl.value.trim())+'&h='+(parseInt(uiv.value)||24),{headers:CSRF_HDRS}).then(load)}
- function fetchNow(){ustat.textContent='fetching...';fetch('/fetchnow',{headers:CSRF_HDRS}).then(r=>r.text()).then(t=>{ustat.textContent=t;load()})}
- function forgetWifi(){fetch('/forgetwifi',{headers:CSRF_HDRS}).then(r=>r.text()).then(t=>alert(t))}
-+function setPass(){let p=npw.value;if(!p)return;fetch('/setpass?p='+encodeURIComponent(p),{headers:CSRF_HDRS}).then(r=>r.text()).then(t=>{pwmsg.textContent=t;if(t=='ok')npw.value='';});}
-+function setOtaPass(){let p=notp.value;if(!p)return;fetch('/setotapass?p='+encodeURIComponent(p),{headers:CSRF_HDRS}).then(r=>r.text()).then(t=>{otamsg.textContent=t;if(t=='ok')notp.value='';});}
- fwf.onsubmit=async e=>{e.preventDefault();let f=fwb.files[0];if(!f)return;fwmsg.textContent='flashing '+(f.size/1048576).toFixed(2)+' MB...';
- let fd=new FormData();fd.append('f',f);
- try{let r=await fetch('/update',{method:'POST',headers:CSRF_HDRS,body:fd});fwmsg.textContent=r.ok?'✓ rebooting, reconnect in ~15s':'✗ '+await r.text();}
 --- a/platformio.ini
 +++ b/platformio.ini
 @@ -10,9 +10,12 @@
