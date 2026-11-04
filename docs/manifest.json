@@ -1,6 +1,6 @@
 {
-  "name": "C3 AdBlock (upstream 119.29.29.29)",
-  "version": "2.0.0-custom",
+  "name": "C3 AdBlock (dual upstream DNS)",
+  "version": "2.1.0-cn",
   "new_install_prompt_erase": false,
   "builds": [
     {
